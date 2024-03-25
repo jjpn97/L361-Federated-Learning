@@ -26,9 +26,12 @@ from flwr.common.typing import NDArrays, Scalar
 from torch.nn import Module
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.transforms import Compose, ToTensor, Normalize
 from tqdm import tqdm
+from vit_pytorch import SimpleViT
 
 from common.femnist_dataset import FEMNIST
+from common.cifar_dataset import CIFAR
 from flwr.common.logger import log
 
 class IntentionalDropoutError(BaseException):
@@ -63,7 +66,6 @@ def to_tensor_transform(p: Any) -> torch.Tensor:
     """
     return torch.tensor(p)
 
-
 def load_FEMNIST_dataset(  # noqa: N802
     data_dir: Path, mapping: Path, name: str
 ) -> Dataset:
@@ -85,6 +87,34 @@ def load_FEMNIST_dataset(  # noqa: N802
     ])
 
     return FEMNIST(
+        mapping=mapping,
+        name=name,
+        data_dir=data_dir,
+        transform=transform,
+        target_transform=to_tensor_transform,
+    )
+
+def load_CIFAR_dataset(  # noqa: N802
+    data_dir: Path, mapping: Path, name: str
+) -> Dataset:
+    """Load the CIFAR dataset given the mapping .csv file.
+
+    The relevant transforms are automatically applied.
+
+    Args:
+        data_dir (Path): path to the dataset folder.
+        mapping (Path): path to the mapping .csv file chosen.
+        name (str): name of the dataset to load, train or test.
+
+    Returns
+    -------
+        Dataset: CIFAR dataset object, ready-to-use.
+    """
+    transform = transforms.Compose([
+        transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+
+    return CIFAR(
         mapping=mapping,
         name=name,
         data_dir=data_dir,
@@ -180,6 +210,105 @@ def test_FEMNIST(  # noqa: N802
     accuracy = correct / total
     return loss, accuracy
 
+def train_CIFAR(  # noqa: N802
+    net: Module,
+    train_loader: DataLoader, # TODO: add val loader!!
+    val_loader: DataLoader,
+    epochs: int,
+    device: str,
+    optimizer: torch.optim.Optimizer,
+    criterion: Module,
+    max_batches: int | None = None,
+    disable_tqdm=False,
+    **kwargs: dict[str, Any],
+) -> float:
+    """Trains the network on the training set.
+
+    Args:
+        net (Module): generic module object describing the network to train.
+        train_loader (DataLoader): dataloader to iterate during the training.
+        epochs (int): number of epochs of training.
+        device (str): device name onto which perform the computation.
+        optimizer (torch.optim.Optimizer): optimizer object.
+        criterion (Module): generic module describing the loss function.
+
+    Returns
+    -------
+        float: the final epoch mean train loss.
+    """
+    net.train()
+    running_loss, total = 0.0, 0
+    hist = defaultdict(list)
+    for _ in range(epochs):
+        running_loss = 0.0
+        total = 0
+        batch_cnt = 0
+        for data, labels in train_loader:
+            if max_batches is not None and batch_cnt >= max_batches:
+                break
+            batch_cnt += 1
+            data, labels = data.to(device), labels.to(device)
+            optimizer.zero_grad()
+            loss = criterion(net(data), labels)
+            running_loss += loss.item()
+            total += labels.size(0)
+            loss.backward()
+            optimizer.step()
+
+
+        train_loss, train_acc = test_CIFAR(net, train_loader, device=device, criterion=criterion, max_batches=50, disable_tqdm=disable_tqdm)
+        val_loss, val_acc = test_CIFAR(net, val_loader, device=device, criterion=criterion, max_batches=50, disable_tqdm=disable_tqdm)
+        # print(f'TRAIN LOSS {train_loss} || VAL LOSS {val_loss} || TRAIN ACC {train_acc} || VAL ACC {val_acc}')
+        hist['train_loss'].append(train_loss)
+        hist['train_accuracy'].append(train_acc)
+        hist['val_loss'].append(val_loss)
+        hist['val_accuracy'].append(val_acc)
+
+    train_loss = running_loss / total
+    return train_loss, hist
+
+
+def test_CIFAR(  # noqa: N802
+    net: Module,
+    test_loader: DataLoader,
+    device: str,
+    criterion: Module,
+    max_batches: int | None = None,
+    disable_tqdm=False,
+    **kwargs: dict[str, Any],
+) -> tuple[float, float]:
+    """Validate the network on a test set.
+
+    Args:
+        net (Module): generic module object describing the network to test.
+        test_loader (DataLoader): dataloader to iterate during the testing.
+        device (str):  device name onto which perform the computation.
+        criterion (Module): generic module describing the loss function.
+
+    Returns
+    -------
+        tuple[float, float]:
+            couple of average test loss and average accuracy on the test set.
+    """
+    batch_cnt = 0
+    correct, total, loss = 0, 0, 0.0
+    net.eval()
+
+    with torch.no_grad():
+        for data, labels in tqdm(test_loader, disable=disable_tqdm):
+
+            if max_batches is not None and batch_cnt >= max_batches:
+                break
+            batch_cnt += 1
+            data, labels = data.to(device), labels.to(device)
+            outputs = net(data)
+            loss += criterion(outputs, labels).item()
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    accuracy = correct / total
+    return loss, accuracy
 
 def get_activations_from_random_input(
     net: Module,
@@ -233,6 +362,32 @@ class Net(nn.Module):
         x = self.fc3(x)
         return x
 
+class NetCIFAR(nn.Module):
+    """Simple CNN adapted from 'PyTorch: A 60 Minute Blitz'."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 6, 5)
+        self.bn1 = nn.BatchNorm2d(6)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.bn2 = nn.BatchNorm2d(16)
+        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.bn3 = nn.BatchNorm1d(120)
+        self.fc2 = nn.Linear(120, 84)
+        self.bn4 = nn.BatchNorm1d(84)
+        self.fc3 = nn.Linear(84, 10)
+
+    # pylint: disable=arguments-differ,invalid-name
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute forward pass."""
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))
+        x = self.pool(F.relu(self.bn2(self.conv2(x))))
+        x = x.view(-1, 16 * 5 * 5)
+        x = F.relu(self.bn3(self.fc1(x)))
+        x = F.relu(self.bn4(self.fc2(x)))
+        x = self.fc3(x)
+        return x
 
 # Define a simple MLP
 class MLP(nn.Module):
@@ -270,6 +425,34 @@ def get_network_generator_cnn() -> Callable[[], Net]:
     untrained_net: Net = Net()
 
     def generated_net() -> Net:
+        return deepcopy(untrained_net)
+
+    return generated_net
+
+# All experiments will have the exact same initialization.
+# All differences in performance will come from training
+def get_network_generator_cifar() -> Callable[[], Net]:
+    """Get function to generate a new CNN model."""
+    untrained_net: Net = NetCIFAR()
+
+    def generated_net() -> Net:
+        return deepcopy(untrained_net)
+
+    return generated_net
+
+
+def get_network_generator_vit():
+    untrained_net = SimpleViT(
+          image_size = 32,
+          patch_size = 4,
+          num_classes = 10,
+          dim = 64,
+          depth = 3,
+          heads = 4,
+          mlp_dim = 128
+    )
+
+    def generated_net():
         return deepcopy(untrained_net)
 
     return generated_net
@@ -426,6 +609,94 @@ def get_federated_evaluation_function(
         )
 
         loss, acc = test_FEMNIST(
+            net=net,
+            test_loader=valid_loader,
+            device=device,
+            criterion=criterion,
+        )
+        return loss, {"accuracy": acc}
+
+    return federated_evaluation_function
+
+def get_federated_evaluation_function_cifar(
+    data_dir: Path,
+    centralized_mapping: Path,
+    device: str,
+    batch_size: int,
+    num_workers: int,
+    model_generator: Callable[[], Module],
+    criterion: Module,
+) -> Callable[[int, NDArrays, dict[str, Any]], tuple[float, dict[str, Scalar]]]:
+    """Wrap function for the external federated evaluation function.
+
+    It provides the external federated evaluation function with some
+    parameters for the dataloader, the model generator function, and
+    the criterion used in the evaluation.
+
+    Args:
+        data_dir (Path): path to the dataset folder.
+        centralized_mapping (Path): path to the mapping .csv file chosen.
+        device (str):  device name onto which perform the computation.
+        batch_size (int): batch size of the test set to use.
+        num_workers (int): correspond to `num_workers` param in the Dataloader object.
+        model_generator (Callable[[], Module]):  model generator function.
+        criterion (Module): PyTorch Module containing the criterion.
+
+    Returns
+    -------
+        Callable[[int, NDArrays, dict[str, Any]], tuple[float, dict[str, Scalar]]]:
+            external federated evaluation function.
+    """
+    full_file: Path = centralized_mapping
+    dataset: Dataset = load_CIFAR_dataset(data_dir, full_file, "val")
+    num_samples = len(cast(Sized, dataset))
+    index_list = list(range(num_samples))
+    prng = np.random.RandomState(1337)
+    prng.shuffle(index_list)
+    index_list = index_list[:1500]
+    dataset = torch.utils.data.Subset(dataset, index_list)
+
+    log(
+        logging.INFO,
+        "Reduced federated test_set size from %s to a size of %s mean index: %s",
+        num_samples,
+        len(cast(Sized, dataset)),
+        np.mean(index_list),
+    )
+
+    def federated_evaluation_function(
+        server_round: int,
+        parameters: NDArrays,
+        fed_eval_config: dict[
+            str, Any
+        ],  # mandatory argument, even if it's not being used
+    ) -> tuple[float, dict[str, Scalar]]:
+        """Evaluate on a centralized test set.
+
+        It uses the centralized val set for sake of simplicity.
+
+        Args:
+            server_round (int): current federated round.
+            parameters (NDArrays): current model parameters.
+            fed_eval_config (dict[str, Any]): mandatory argument in Flower,
+                                              can contain some configuration info
+
+        Returns
+        -------
+            tuple[float, dict[str, Scalar]]: evaluation results
+        """
+        net: Module = set_model_parameters(model_generator(), parameters)
+        net.to(device)
+
+        valid_loader = DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            drop_last=False,
+        )
+
+        loss, acc = test_CIFAR(
             net=net,
             test_loader=valid_loader,
             device=device,

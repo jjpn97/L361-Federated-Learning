@@ -1,0 +1,17 @@
+git+https://github.com/Iacob-Alexandru-Andrei/flower.git@teaching
+cryptography==41.0.7
+flwr==1.7.0
+flwr_datasets==0.1.0
+gdown==5.1.0
+matplotlib==3.8.3
+numpy==1.26.4
+pandas==2.2.1
+Pillow==10.2.0
+pycryptodome==3.20.0
+scikit_learn==1.4.1.post1
+scipy==1.12.0
+seaborn==0.13.2
+torch==2.2.1
+torchvision==0.17.1
+tqdm==4.66.2
+vit_pytorch==1.6.5

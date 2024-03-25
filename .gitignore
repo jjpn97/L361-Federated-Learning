@@ -77,6 +77,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
 # IPython
 profile_default/
@@ -167,3 +168,8 @@ device_info.tar.gz
 device_info
 # Histories
 histories
+
+# CIFAR
+cifar/client_data_mappings
+cifar/experiments
+cifar/weights/*.pt
